@@ -7,11 +7,8 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import defaultdict
+import tempfile
 from pathlib import Path
-
-DEFAULT_BIN_RE = r"^(rootfs?_.*|root_.*)\.bin$"
-
 
 def safe_name(path_part: str) -> str:
     s = path_part.replace("/", "__").replace("\\", "__")
@@ -20,7 +17,7 @@ def safe_name(path_part: str) -> str:
 
 
 def run_tag_to_relpath(run_tag: str) -> Path:
-    # Keep hierarchical tags like "original/M2", but block path traversal.
+    # Keep hierarchical tags like "stock/M2", but block path traversal.
     p = Path(run_tag)
     parts = [x for x in p.parts if x not in ("", ".")]
     if any(x == ".." for x in parts):
@@ -30,84 +27,21 @@ def run_tag_to_relpath(run_tag: str) -> Path:
     return Path(*parts)
 
 
-def find_bins(firmware_dir: Path, bin_regex: str):
-    cre = re.compile(bin_regex, re.IGNORECASE)
-    bins_by_bucket = defaultdict(list)
-    for p in firmware_dir.rglob("*.bin"):
-        rel = p.relative_to(firmware_dir)
-        # stock/<model>/<firmware.bin> => bucket by file (each file is a version)
-        # original/<model>/<version>/<part.bin> => bucket by version folder
-        bucket = p if len(rel.parts) <= 2 else p.parent
-        bins_by_bucket[bucket].append(p)
-
-    selected = []
-    matched_dirs = 0
-    fallback_dirs = 0
-    for bucket in sorted(bins_by_bucket.keys()):
-        bucket_bins = sorted(bins_by_bucket[bucket])
-        matched = [p for p in bucket_bins if cre.match(p.name)]
-        if matched:
-            matched_dirs += 1
-            selected.extend(matched)
-            continue
-        fallback_dirs += 1
-        selected.append(select_fallback_bin(bucket_bins))
-
+def find_bins(firmware_dir: Path):
+    all_bins = sorted([p for p in firmware_dir.rglob("*.bin") if p.is_file()])
     print(
-        f"[run_all_firmware] candidate discovery: {len(bins_by_bucket)} buckets, "
-        f"{matched_dirs} regex-hit buckets, {fallback_dirs} fallback buckets, {len(selected)} selected bins"
+        f"[run_all_firmware] candidate discovery: {len(all_bins)} total bins, "
+        f"{len(all_bins)} selected bins"
     )
-    return sorted(selected)
+    return all_bins
 
 
-def fallback_score(bin_path: Path):
-    name = bin_path.name.lower()
-    if name.startswith("rootfs"):
-        cls = 0
-    elif name.startswith("root_"):
-        cls = 1
-    elif name.startswith("ota") or "_ota_" in name:
-        cls = 2
-    elif "firmware" in name:
-        cls = 3
-    elif name.startswith("lumi.camera"):
-        cls = 4
-    else:
-        cls = 5
+def bin_id_for_path(bin_path: Path, firmware_dir: Path):
     try:
-        size = bin_path.stat().st_size
-    except OSError:
-        size = 0
-    # Lower class first; larger size first; stable tie break by name.
-    return (cls, -size, name)
-
-
-def select_fallback_bin(parent_bins):
-    return sorted(parent_bins, key=fallback_score)[0]
-
-
-def ensure_extracted(bin_path: Path, firmware_dir: Path, work_root: Path, recursive: bool = True):
-    rel_parent = bin_path.parent.relative_to(firmware_dir)
-    source_bucket = work_root / rel_parent
-    source_bucket.mkdir(parents=True, exist_ok=True)
-
-    out_dir = source_bucket / f"{bin_path.name}.extracted"
-    if out_dir.exists() and any(out_dir.rglob("squashfs-root")):
-        return out_dir
-
-    # Binwalk creates a symlink in the output directory and may fail on retries
-    # after a partial extraction if stale artifacts remain.
-    stale_link = source_bucket / bin_path.name
-    if stale_link.exists() or stale_link.is_symlink():
-        stale_link.unlink()
-    if out_dir.exists():
-        shutil.rmtree(out_dir, ignore_errors=True)
-
-    cmd = ["binwalk", "-Me" if recursive else "-e", str(bin_path), "-C", str(source_bucket)]
-    subprocess.run(cmd, check=False)
-    if out_dir.exists():
-        return out_dir
-    return None
+        rel_for_id = bin_path.relative_to(firmware_dir)
+    except ValueError:
+        rel_for_id = bin_path.name
+    return safe_name(str(rel_for_id).replace(".bin", ""))
 
 
 def find_ha_master(extracted_dir: Path):
@@ -115,6 +49,38 @@ def find_ha_master(extracted_dir: Path):
         if p.is_file():
             return p
     return None
+
+
+def prepare_ha_master(bin_path: Path, firmware_dir: Path, ha_master_dir: Path, recursive: bool = True):
+    bin_id = bin_id_for_path(bin_path, firmware_dir)
+    keep_dir = ha_master_dir / bin_id
+    keep_path = keep_dir / "ha_master"
+
+    if keep_path.exists() and keep_path.is_file() and keep_path.stat().st_size > 0:
+        return keep_path, "cached"
+
+    if keep_path.exists() and not keep_path.is_file():
+        if keep_path.is_dir():
+            shutil.rmtree(keep_path, ignore_errors=True)
+        else:
+            keep_path.unlink(missing_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="ha_master_extract_") as tmp:
+        tmp_dir = Path(tmp)
+        cmd = ["binwalk", "-Me" if recursive else "-e", str(bin_path), "-C", str(tmp_dir)]
+        subprocess.run(cmd, check=False)
+
+        out_dir = tmp_dir / f"{bin_path.name}.extracted"
+        if not out_dir.exists():
+            return None, "extract_failed"
+
+        ha = find_ha_master(out_dir)
+        if not ha:
+            return None, "ha_master_not_found"
+
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ha, keep_path)
+        return keep_path, "extracted"
 
 
 def run_ida(idat: Path, ida_script: Path, ha_master: Path, report_path: Path, log_path: Path):
@@ -193,9 +159,9 @@ def setup_log_file(log_file):
     print(f"[run_all_firmware] logging to {log_path}", flush=True)
 
 
-def check_dependencies(idat: Path):
+def check_dependencies(idat: Path, require_binwalk: bool = True):
     errors = []
-    if not shutil.which("binwalk"):
+    if require_binwalk and not shutil.which("binwalk"):
         errors.append("`binwalk` is not in PATH")
     if not idat.exists():
         errors.append(f"`idat` does not exist: {idat}")
@@ -206,7 +172,7 @@ def check_dependencies(idat: Path):
             print(f"[run_all_firmware] dependency error: {err}", file=sys.stderr, flush=True)
         raise SystemExit(2)
 
-    if not shutil.which("jefferson"):
+    if require_binwalk and not shutil.which("jefferson"):
         print(
             "[run_all_firmware] warning: `jefferson` is missing from PATH; JFFS2 extraction will fail. "
             "Install with: python3 -m pip install jefferson",
@@ -226,13 +192,6 @@ def main():
         default=None,
         help="Default: <project-root>/stock",
     )
-    parser.add_argument(
-        "--original-dir",
-        dest="firmware_dir",
-        type=Path,
-        default=None,
-        help="Deprecated alias for --firmware-dir",
-    )
     parser.add_argument("--extractions-dir", type=Path, default=None, help="Default: <project-root>/extractions")
     parser.add_argument(
         "--idat",
@@ -245,7 +204,6 @@ def main():
         type=Path,
         default=Path(__file__).resolve().parent / "ida_system_strings.py",
     )
-    parser.add_argument("--bin-regex", type=str, default=DEFAULT_BIN_RE)
     parser.set_defaults(binwalk_recursive=True)
     parser.add_argument(
         "--binwalk-recursive",
@@ -266,7 +224,7 @@ def main():
         "--run-tag",
         type=str,
         default=None,
-        help="Output namespace under extractions/runs/<run-tag>. Example: original_M2, original_all",
+        help="Output namespace under extractions/runs/<run-tag>. Example: stock_M2, stock_all",
     )
     parser.add_argument(
         "--log-file",
@@ -274,9 +232,14 @@ def main():
         default=None,
         help="Optional log file path. Parent directories are auto-created.",
     )
+    parser.add_argument(
+        "--ha-master-dir",
+        type=Path,
+        default=None,
+        help="Directory for persisted ha_master binaries. Default: <run-root>/ha_master_cache",
+    )
     args = parser.parse_args()
     setup_log_file(args.log_file)
-    check_dependencies(args.idat)
 
     project_root = args.project_root.resolve()
     firmware_dir = (args.firmware_dir or (project_root / "stock")).resolve()
@@ -293,45 +256,59 @@ def main():
     reports_dir = run_root / "reports"
     logs_dir = run_root / "logs"
     summaries_dir = run_root / "summaries"
+    if args.ha_master_dir:
+        ha_master_dir = args.ha_master_dir.expanduser()
+        if not ha_master_dir.is_absolute():
+            ha_master_dir = (project_root / ha_master_dir)
+        ha_master_dir = ha_master_dir.resolve()
+    else:
+        ha_master_dir = run_root / "ha_master_cache"
     reports_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     summaries_dir.mkdir(parents=True, exist_ok=True)
+    ha_master_dir.mkdir(parents=True, exist_ok=True)
 
     if args.single_bin:
         bins = [args.single_bin.resolve()]
     else:
-        bins = find_bins(firmware_dir, args.bin_regex)
+        bins = find_bins(firmware_dir)
+
+    need_binwalk = False
+    for b in bins:
+        bin_id = bin_id_for_path(b, firmware_dir)
+        keep_path = ha_master_dir / bin_id / "ha_master"
+        if not (keep_path.exists() and keep_path.is_file() and keep_path.stat().st_size > 0):
+            need_binwalk = True
+            break
+    check_dependencies(args.idat, require_binwalk=need_binwalk)
 
     summary = []
 
     def extract_job(bin_path: Path):
         rel = bin_path.relative_to(project_root) if bin_path.is_relative_to(project_root) else bin_path
-        out = ensure_extracted(bin_path, firmware_dir, run_root, recursive=args.binwalk_recursive)
-        return rel, bin_path, out
+        ha, prep_status = prepare_ha_master(
+            bin_path,
+            firmware_dir,
+            ha_master_dir,
+            recursive=args.binwalk_recursive,
+        )
+        return rel, bin_path, ha, prep_status
 
     extracted = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.extract_workers) as ex:
         futures = [ex.submit(extract_job, b) for b in bins]
         for fut in concurrent.futures.as_completed(futures):
-            rel, bin_path, out = fut.result()
+            rel, bin_path, ha, prep_status = fut.result()
             source_bin = str(rel)
-            if not out:
-                summary.append({"source_bin": source_bin, "status": "extract_failed", "info": str(bin_path)})
+            if not ha:
+                status = prep_status if prep_status in {"extract_failed", "ha_master_not_found"} else "extract_failed"
+                summary.append({"source_bin": source_bin, "status": status, "info": str(bin_path)})
                 continue
-            extracted.append((source_bin, bin_path, out))
+            extracted.append((source_bin, bin_path, ha))
 
     jobs = []
-    for source_bin, bin_path, out in extracted:
-        ha = find_ha_master(out)
-        if not ha:
-            summary.append({"source_bin": source_bin, "status": "ha_master_not_found", "info": str(out)})
-            continue
-
-        try:
-            rel_for_id = bin_path.relative_to(firmware_dir)
-        except ValueError:
-            rel_for_id = bin_path.name
-        bin_id = safe_name(str(rel_for_id).replace(".bin", ""))
+    for source_bin, bin_path, ha in extracted:
+        bin_id = bin_id_for_path(bin_path, firmware_dir)
         report = reports_dir / f"ha_master_{bin_id}_report.md"
         log = logs_dir / f"ida_{bin_id}.log"
         jobs.append((source_bin, ha, report, log))
