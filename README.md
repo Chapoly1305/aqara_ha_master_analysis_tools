@@ -109,3 +109,16 @@ CSV columns:
 ## Classification Logic
 
 Summary classification checks `Xref EA:` before `Xrefs: none` to avoid false `found_no_xref` when real xrefs exist.
+
+
+
+```
+python3 scripts/run_all_firmware.py \
+    --firmware-dir /Volumes/TimeMachine/AqaraCameraHubfw/stock \
+    --idat "/Applications/IDA Professional 9.2.app/Contents/MacOS/idat"
+
+python3 scripts/run_all_firmware.py \
+    --firmware-dir /Volumes/TimeMachine/AqaraM1SM2fw/stock \
+    --idat "/Applications/IDA Professional 9.2.app/Contents/MacOS/idat"
+
+```

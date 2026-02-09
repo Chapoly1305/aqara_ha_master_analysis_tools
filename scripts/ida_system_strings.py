@@ -57,14 +57,29 @@ def is_data_ea(ea):
     return seg_class(ea) in {"DATA", "BSS", "CONST", "RODATA"}
 
 
+def seg_bounds(ea):
+    seg = ida_segment.getseg(ea)
+    if seg:
+        try:
+            return seg.start_ea, seg.end_ea
+        except Exception:
+            pass
+    # Backward-compat fallback for older IDA APIs.
+    try:
+        return ida_segment.get_segm_start(ea), ida_segment.get_segm_end(ea)
+    except Exception:
+        return None, None
+
+
 def pointer_refs_to_ea(target_ea):
     refs = []
     for seg_ea in idautils.Segments():
         sc = seg_class(seg_ea)
         if sc not in {"DATA", "BSS", "CONST", "RODATA"}:
             continue
-        start = ida_segment.get_segm_start(seg_ea)
-        end = ida_segment.get_segm_end(seg_ea)
+        start, end = seg_bounds(seg_ea)
+        if start is None or end is None:
+            continue
         ea = start
         while ea + 4 <= end:
             if ida_bytes.get_dword(ea) == target_ea:
