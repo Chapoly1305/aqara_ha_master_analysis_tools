@@ -11,7 +11,6 @@ It does not include firmware binaries, extracted rootfs content, IDA databases, 
 ## Included Files
 
 - `scripts/run_all_firmware.py` (main pipeline)
-- `scripts/run_batch.py` (legacy version-driven pipeline)
 - `scripts/ida_system_strings.py` (IDA headless script)
 - `README.md`
 
@@ -36,8 +35,14 @@ Extract candidate firmware bins, locate `ha_master`, and run IDA headless analys
 - Default firmware input: `<project-root>/stock/...`
 - Default output root: `<project-root>/extractions/...`
 - Per-run outputs: `<project-root>/extractions/runs/<run-tag>/...`
+- Persisted extracted binaries: `<run-root>/ha_master_cache/...` (or `--ha-master-dir`)
 
-Note: `--original-dir` is still accepted, but it is a deprecated alias of `--firmware-dir`.
+### Extraction Strategy
+
+- Each firmware bin is extracted in a `tempfile` temporary directory.
+- Only the discovered `ha_master` file is copied to the persistent cache directory.
+- Temporary extraction directories are removed automatically after each bin.
+- If cached `ha_master` already exists for a bin, binwalk is skipped.
 
 ### Quick Start
 
@@ -79,13 +84,12 @@ python3 scripts/run_all_firmware.py \
 
 ### Useful Options
 
-- `--firmware-dir /path/to/stock_or_original`
-- `--original-dir /path/to/stock_or_original` (deprecated alias)
+- `--firmware-dir /path/to/stock`
 - `--extractions-dir /path/to/extractions`
-- `--bin-regex '^(rootfs?_.*|root_.*)\\.bin$'`
 - `--single-bin /path/to/one.bin`
 - `--run-tag stock_M2` (recommended for run isolation)
 - `--log-file /path/to/run.log`
+- `--ha-master-dir /path/to/persisted_ha_master`
 - `--binwalk-recursive` (default enabled; uses `binwalk -Me`)
 - `--no-binwalk-recursive` (uses `binwalk -e`)
 
@@ -93,6 +97,7 @@ python3 scripts/run_all_firmware.py \
 
 Generated in `<project-root>/extractions/runs/<run-tag>/`:
 
+- `ha_master_cache/<source_id>/ha_master` (persisted binaries for IDA input)
 - `reports/ha_master_<source_id>_report.md`
 - `logs/ida_<source_id>.log`
 - `summaries/ha_master_all_firmware_summary.csv`
@@ -100,36 +105,6 @@ Generated in `<project-root>/extractions/runs/<run-tag>/`:
 
 CSV columns:
 `source_bin,system_run,system_command,status,report_or_info`
-
-## Legacy Pipeline: run_batch.py
-
-This script is version-list driven and oriented to `original/M2` style layouts.
-
-Default behavior:
-- reads versions from `<project-root>/VERSIONS.txt`
-- scans `<project-root>/original/M2`
-- writes outputs directly under `<project-root>/extractions`
-
-Example:
-
-```bash
-python3 scripts/run_batch.py \
-  --project-root /path/to/AqaraM1SM2fw \
-  --original-dir /path/to/AqaraM1SM2fw/original/M2 \
-  --idat "/Applications/IDA Professional 9.2.app/Contents/MacOS/idat"
-```
-
-Optional single-version filter:
-
-```bash
-python3 scripts/run_batch.py \
-  --project-root /path/to/AqaraM1SM2fw \
-  --version 4.3.7
-```
-
-Primary outputs:
-- `<extractions-dir>/ha_master_all_versions_summary.txt`
-- `<extractions-dir>/ha_master_all_versions_summary.md`
 
 ## Classification Logic
 
