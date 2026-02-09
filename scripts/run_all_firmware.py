@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 def safe_name(path_part: str) -> str:
     s = path_part.replace("/", "__").replace("\\", "__")
@@ -25,6 +26,22 @@ def run_tag_to_relpath(run_tag: str) -> Path:
     if not parts:
         raise ValueError("invalid run-tag: empty")
     return Path(*parts)
+
+
+def infer_dataset_name(firmware_dir: Path):
+    if firmware_dir.name.lower() == "stock" and firmware_dir.parent.name:
+        return safe_name(firmware_dir.parent.name)
+    if firmware_dir.parent.name.lower() == "stock" and firmware_dir.parent.parent.name:
+        return safe_name(firmware_dir.parent.parent.name)
+    return safe_name(firmware_dir.name)
+
+
+def infer_run_tag(firmware_dir: Path):
+    if firmware_dir.name.lower() == "stock":
+        return Path("stock_all")
+    if firmware_dir.parent.name.lower() == "stock":
+        return Path(f"stock_{safe_name(firmware_dir.name)}")
+    return Path(safe_name(firmware_dir.name))
 
 
 def find_bins(firmware_dir: Path):
@@ -51,7 +68,22 @@ def find_ha_master(extracted_dir: Path):
     return None
 
 
-def prepare_ha_master(bin_path: Path, firmware_dir: Path, ha_master_dir: Path, recursive: bool = True):
+def resolve_path(p: Optional[Path], base: Path):
+    if p is None:
+        return None
+    p = p.expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (base / p).resolve()
+
+
+def prepare_ha_master(
+    bin_path: Path,
+    firmware_dir: Path,
+    ha_master_dir: Path,
+    temp_root: Optional[Path] = None,
+    recursive: bool = True,
+):
     bin_id = bin_id_for_path(bin_path, firmware_dir)
     keep_dir = ha_master_dir / bin_id
     keep_path = keep_dir / "ha_master"
@@ -65,7 +97,15 @@ def prepare_ha_master(bin_path: Path, firmware_dir: Path, ha_master_dir: Path, r
         else:
             keep_path.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="ha_master_extract_") as tmp:
+    try:
+        tmp_ctx = tempfile.TemporaryDirectory(
+            prefix="ha_master_extract_",
+            dir=str(temp_root) if temp_root else None,
+        )
+    except Exception:
+        return None, "tempdir_failed"
+
+    with tmp_ctx as tmp:
         tmp_dir = Path(tmp)
         cmd = ["binwalk", "-Me" if recursive else "-e", str(bin_path), "-C", str(tmp_dir)]
         subprocess.run(cmd, check=False)
@@ -78,8 +118,11 @@ def prepare_ha_master(bin_path: Path, firmware_dir: Path, ha_master_dir: Path, r
         if not ha:
             return None, "ha_master_not_found"
 
-        keep_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ha, keep_path)
+        try:
+            keep_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ha, keep_path)
+        except OSError:
+            return None, "persist_failed"
         return keep_path, "extracted"
 
 
@@ -185,14 +228,24 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract firmware bins and analyze ha_master with IDA headless"
     )
-    parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="Base directory for defaults. Default: current working directory.",
+    )
     parser.add_argument(
         "--firmware-dir",
         type=Path,
         default=None,
         help="Default: <project-root>/stock",
     )
-    parser.add_argument("--extractions-dir", type=Path, default=None, help="Default: <project-root>/extractions")
+    parser.add_argument(
+        "--extractions-dir",
+        type=Path,
+        default=None,
+        help="Default: <project-root>/extractions/<dataset-name>",
+    )
     parser.add_argument(
         "--idat",
         type=Path,
@@ -238,29 +291,31 @@ def main():
         default=None,
         help="Directory for persisted ha_master binaries. Default: <run-root>/ha_master_cache",
     )
+    parser.add_argument(
+        "--temp-root",
+        type=Path,
+        default=None,
+        help="Local temp root for binwalk extraction. Default: <project-root>/.tmp",
+    )
     args = parser.parse_args()
     setup_log_file(args.log_file)
 
-    project_root = args.project_root.resolve()
-    firmware_dir = (args.firmware_dir or (project_root / "stock")).resolve()
-    extractions_dir = (args.extractions_dir or (project_root / "extractions")).resolve()
+    project_root = (args.project_root or Path.cwd()).resolve()
+    firmware_dir = resolve_path(args.firmware_dir, project_root) or (project_root / "stock")
+    dataset_name = infer_dataset_name(firmware_dir)
+    extractions_dir = resolve_path(args.extractions_dir, project_root) or (project_root / "extractions" / dataset_name)
+    temp_root = resolve_path(args.temp_root, project_root) or (project_root / ".tmp")
+    temp_root.mkdir(parents=True, exist_ok=True)
     if args.run_tag:
         run_tag_rel = run_tag_to_relpath(args.run_tag)
     else:
-        try:
-            rel_firmware = firmware_dir.relative_to(project_root)
-            run_tag_rel = rel_firmware
-        except ValueError:
-            run_tag_rel = Path(safe_name(str(firmware_dir)))
+        run_tag_rel = infer_run_tag(firmware_dir)
     run_root = extractions_dir / "runs" / run_tag_rel
     reports_dir = run_root / "reports"
     logs_dir = run_root / "logs"
     summaries_dir = run_root / "summaries"
     if args.ha_master_dir:
-        ha_master_dir = args.ha_master_dir.expanduser()
-        if not ha_master_dir.is_absolute():
-            ha_master_dir = (project_root / ha_master_dir)
-        ha_master_dir = ha_master_dir.resolve()
+        ha_master_dir = resolve_path(args.ha_master_dir, project_root)
     else:
         ha_master_dir = run_root / "ha_master_cache"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -290,6 +345,7 @@ def main():
             bin_path,
             firmware_dir,
             ha_master_dir,
+            temp_root=temp_root,
             recursive=args.binwalk_recursive,
         )
         return rel, bin_path, ha, prep_status
@@ -298,10 +354,19 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.extract_workers) as ex:
         futures = [ex.submit(extract_job, b) for b in bins]
         for fut in concurrent.futures.as_completed(futures):
-            rel, bin_path, ha, prep_status = fut.result()
+            try:
+                rel, bin_path, ha, prep_status = fut.result()
+            except Exception as e:
+                summary.append({"source_bin": "<internal>", "status": "extract_exception", "info": str(e)})
+                continue
             source_bin = str(rel)
             if not ha:
-                status = prep_status if prep_status in {"extract_failed", "ha_master_not_found"} else "extract_failed"
+                status = prep_status if prep_status in {
+                    "extract_failed",
+                    "ha_master_not_found",
+                    "persist_failed",
+                    "tempdir_failed",
+                } else "extract_failed"
                 summary.append({"source_bin": source_bin, "status": status, "info": str(bin_path)})
                 continue
             extracted.append((source_bin, bin_path, ha))

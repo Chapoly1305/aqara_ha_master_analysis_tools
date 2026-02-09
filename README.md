@@ -32,10 +32,12 @@ Extract candidate firmware bins, locate `ha_master`, and run IDA headless analys
 
 ### Default Layout
 
+- Default base dir (`project-root`): current working directory
 - Default firmware input: `<project-root>/stock/...`
-- Default output root: `<project-root>/extractions/...`
+- Default output root: `<project-root>/extractions/<dataset-name>/...`
 - Per-run outputs: `<project-root>/extractions/runs/<run-tag>/...`
 - Persisted extracted binaries: `<run-root>/ha_master_cache/...` (or `--ha-master-dir`)
+- Local temporary extraction root: `<project-root>/.tmp/...` (or `--temp-root`)
 
 ### Extraction Strategy
 
@@ -48,7 +50,6 @@ Extract candidate firmware bins, locate `ha_master`, and run IDA headless analys
 
 ```bash
 python3 scripts/run_all_firmware.py \
-  --project-root /path/to/AqaraM1SM2fw \
   --idat /path/to/idat
 ```
 
@@ -56,7 +57,6 @@ On macOS:
 
 ```bash
 python3 scripts/run_all_firmware.py \
-  --project-root /path/to/AqaraM1SM2fw \
   --idat "/Applications/IDA Professional 9.2.app/Contents/MacOS/idat"
 ```
 
@@ -64,7 +64,6 @@ Run a specific firmware tree with isolated namespace:
 
 ```bash
 python3 scripts/run_all_firmware.py \
-  --project-root /path/to/AqaraM1SM2fw \
   --firmware-dir /path/to/AqaraM1SM2fw/stock/M2 \
   --idat "/Applications/IDA Professional 9.2.app/Contents/MacOS/idat" \
   --run-tag stock_M2
@@ -74,7 +73,6 @@ python3 scripts/run_all_firmware.py \
 
 ```bash
 python3 scripts/run_all_firmware.py \
-  --project-root /data/AqaraM1SM2fw \
   --firmware-dir /data/AqaraM1SM2fw/stock \
   --idat /opt/ida/idat \
   --extract-workers 16 \
@@ -86,10 +84,12 @@ python3 scripts/run_all_firmware.py \
 
 - `--firmware-dir /path/to/stock`
 - `--extractions-dir /path/to/extractions`
+- `--project-root /path/to/base` (optional, default: current directory)
 - `--single-bin /path/to/one.bin`
-- `--run-tag stock_M2` (recommended for run isolation)
+- `--run-tag stock_M2` (optional; auto defaults to `stock_all` or `stock_<model>`)
 - `--log-file /path/to/run.log`
 - `--ha-master-dir /path/to/persisted_ha_master`
+- `--temp-root /path/to/local_tmp_root`
 - `--binwalk-recursive` (default enabled; uses `binwalk -Me`)
 - `--no-binwalk-recursive` (uses `binwalk -e`)
 
